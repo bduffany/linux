@@ -355,6 +355,7 @@ static void nbd_complete_rq(struct request *req)
 		cmd->status ? "failed" : "done");
 
 	blk_mq_end_request(req, cmd->status);
+	printbb("! nbd_complete_rq: completed %p", req);
 }
 
 /*
@@ -401,6 +402,8 @@ static enum blk_eh_timer_return nbd_xmit_timeout(struct request *req,
 	struct nbd_cmd *cmd = blk_mq_rq_to_pdu(req);
 	struct nbd_device *nbd = cmd->nbd;
 	struct nbd_config *config;
+
+	printbb("nbd_xmit_timeout");
 
 	if (!mutex_trylock(&cmd->lock))
 		return BLK_EH_RESET_TIMER;
@@ -453,6 +456,9 @@ static enum blk_eh_timer_return nbd_xmit_timeout(struct request *req,
 		 */
 		struct nbd_sock *nsock = config->socks[cmd->index];
 		cmd->retries++;
+		printbb("! stuck request: %x <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<", req);
+		// printbb_flush();
+
 		dev_info(nbd_to_dev(nbd), "Possible stuck request %p: control (%s@%llu,%uB). Runtime %u seconds\n",
 			req, nbdcmd_to_ascii(req_to_nbd_cmd_type(req)),
 			(unsigned long long)blk_rq_pos(req) << 9,
@@ -513,11 +519,15 @@ static int sock_xmit(struct nbd_device *nbd, int index, int send,
 		msg.msg_controllen = 0;
 		msg.msg_flags = msg_flags | MSG_NOSIGNAL;
 
-		if (send)
+		if (send) {
+			printbb(">>> nbd send");
 			result = sock_sendmsg(sock, &msg);
-		else
+			printbb("<<< nbd send (%d)", result);
+		} else {
+			printbb(">>> nbd recv");
 			result = sock_recvmsg(sock, &msg, msg.msg_flags);
-
+			printbb("<<< nbd recv (%d)", result);
+		}
 		if (result <= 0) {
 			if (result == 0)
 				result = -EPIPE; /* short read */
@@ -527,7 +537,9 @@ static int sock_xmit(struct nbd_device *nbd, int index, int send,
 			*sent += result;
 	} while (msg_data_left(&msg));
 
+	// printbb("memalloc_noreclaim_restore {");
 	memalloc_noreclaim_restore(noreclaim_flag);
+	// printbb("} // memalloc_noreclaim_restore");
 
 	return result;
 }
@@ -585,6 +597,7 @@ static int nbd_send_cmd(struct nbd_device *nbd, struct nbd_cmd *cmd, int index)
 			/* initialize handle for tracing purposes */
 			handle = nbd_cmd_handle(cmd);
 
+			printbb("! already sent req; sending rest of pages.");
 			goto send_pages;
 		}
 		iov_iter_advance(&from, sent);
@@ -607,8 +620,10 @@ static int nbd_send_cmd(struct nbd_device *nbd, struct nbd_cmd *cmd, int index)
 	dev_dbg(nbd_to_dev(nbd), "request %p: sending control (%s@%llu,%uB)\n",
 		req, nbdcmd_to_ascii(type),
 		(unsigned long long)blk_rq_pos(req) << 9, blk_rq_bytes(req));
+	// printbb("sock_xmit {");
 	result = sock_xmit(nbd, index, 1, &from,
 			(type == NBD_CMD_WRITE) ? MSG_MORE : 0, &sent);
+	// printbb("} // sock_xmit");
 	trace_nbd_header_sent(req, handle);
 	if (result <= 0) {
 		if (was_interrupted(result)) {
@@ -653,7 +668,9 @@ send_pages:
 				iov_iter_advance(&from, skip);
 				skip = 0;
 			}
+			// printbb("sock_xmit {");
 			result = sock_xmit(nbd, index, 1, &from, flags, &sent);
+			// printbb("} // sock_xmit");
 			if (result <= 0) {
 				if (was_interrupted(result)) {
 					/* We've already sent the header, we
@@ -922,7 +939,6 @@ static int nbd_handle_cmd(struct nbd_cmd *cmd, int index)
 	if (index >= config->num_connections) {
 		dev_err_ratelimited(disk_to_dev(nbd->disk),
 				    "Attempted send on invalid socket\n");
-		nbd_config_put(nbd);
 		blk_mq_start_request(req);
 		return -EINVAL;
 	}
@@ -932,6 +948,7 @@ again:
 	mutex_lock(&nsock->tx_lock);
 	if (nsock->dead) {
 		int old_index = index;
+		printbb("nbd: socket is dead :|");
 		index = find_fallback(nbd, index);
 		mutex_unlock(&nsock->tx_lock);
 		if (index < 0) {
@@ -958,7 +975,9 @@ again:
 	 * here so that it gets put _after_ the request that is already on the
 	 * dispatch list.
 	 */
+	printbb("blk_mq_start_request (%x) {", req);
 	blk_mq_start_request(req);
+	printbb("} // blk_mq_start_request");
 	if (unlikely(nsock->pending && nsock->pending != req)) {
 		nbd_requeue_cmd(cmd);
 		ret = 0;
@@ -968,7 +987,9 @@ again:
 	 * Some failures are related to the link going down, so anything that
 	 * returns EAGAIN can be retried on a different socket.
 	 */
+	printbb("nbd_send_cmd {");
 	ret = nbd_send_cmd(nbd, cmd, index);
+	printbb("} // nbd_send_cmd");
 	if (ret == -EAGAIN) {
 		dev_err_ratelimited(disk_to_dev(nbd->disk),
 				    "Request send failed, requeueing\n");
@@ -997,6 +1018,9 @@ static blk_status_t nbd_queue_rq(struct blk_mq_hw_ctx *hctx,
 	 * that the server is misbehaving (or there was an error) before we're
 	 * done sending everything over the wire.
 	 */
+
+	printbb("! nbd_queue_rq");
+
 	mutex_lock(&cmd->lock);
 	clear_bit(NBD_CMD_REQUEUED, &cmd->flags);
 
@@ -1005,7 +1029,9 @@ static blk_status_t nbd_queue_rq(struct blk_mq_hw_ctx *hctx,
 	 * this case we need to return that we are busy, otherwise error out as
 	 * appropriate.
 	 */
+	printbb("nbd_queue_rq > nbd_handle_cmd {");
 	ret = nbd_handle_cmd(cmd, hctx->queue_num);
+	printbb("} // nbd_queue_rq > nbd_handle_cmd");
 	if (ret < 0)
 		ret = BLK_STS_IOERR;
 	else if (!ret)
@@ -1667,6 +1693,7 @@ static int nbd_init_request(struct blk_mq_tag_set *set, struct request *rq,
 	cmd->nbd = set->driver_data;
 	cmd->flags = 0;
 	mutex_init(&cmd->lock);
+	// printbb("nbd_init_request: initialized req");
 	return 0;
 }
 
@@ -1853,6 +1880,8 @@ static int nbd_genl_connect(struct sk_buff *skb, struct genl_info *info)
 	int ret;
 	bool put_dev = false;
 
+	printbb("nbd_genl_connect {");
+
 	if (!netlink_capable(skb, CAP_SYS_ADMIN))
 		return -EPERM;
 
@@ -1982,7 +2011,9 @@ again:
 			if (!socks[NBD_SOCK_FD])
 				continue;
 			fd = (int)nla_get_u32(socks[NBD_SOCK_FD]);
+			printbb("nbd_add_socket(?, %d) {", fd);
 			ret = nbd_add_socket(nbd, fd, true);
+			printbb("} // nbd_add_socket => %d", ret);
 			if (ret)
 				goto out;
 		}
@@ -2010,18 +2041,24 @@ out:
 	if (!ret) {
 		set_bit(NBD_RT_HAS_CONFIG_REF, &config->runtime_flags);
 		refcount_inc(&nbd->config_refs);
+		printbb("nbd_connect_reply {");
 		nbd_connect_reply(info, nbd->index);
+		printbb("} // nbd_connect_reply");
 	}
 	nbd_config_put(nbd);
 	if (put_dev)
 		nbd_put(nbd);
+
+  printbb("} // nbd_genl_connect");
 	return ret;
 }
 
 static void nbd_disconnect_and_put(struct nbd_device *nbd)
 {
 	mutex_lock(&nbd->config_lock);
+	printbb("nbd_disconnect {");
 	nbd_disconnect(nbd);
+	printbb("} // nbd_disconnect");
 	sock_shutdown(nbd);
 	/*
 	 * Make sure recv thread has finished, so it does not drop the last

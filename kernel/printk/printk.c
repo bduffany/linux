@@ -60,6 +60,99 @@
 #include "braille.h"
 #include "internal.h"
 
+#define DEBUG_BUF_SIZE 10000000
+
+struct debug_buf {
+	size_t len;
+	int indent;
+	// bool sync;
+	char buf[DEBUG_BUF_SIZE];
+};
+
+static struct debug_buf dbb;
+static DEFINE_MUTEX(dbb_lock);
+// DEFINE_PER_CPU(*struct debug_buf, dbb);
+
+void printbb_flush(void) {
+	if (!dbb.len) return; // bleh
+
+	mutex_lock(&dbb_lock);
+
+	if (dbb.len) {
+		dbb.len = 0;
+		printk("%s", dbb.buf);
+		dbb.buf[0] = 0;
+	}
+
+	mutex_unlock(&dbb_lock);
+}
+
+#define INDENT_LEVEL 2
+
+void printbb(const char* const msg, ...) {
+	va_list args;
+	int i;
+	int written;
+	size_t len = strlen(msg); // does NOT include \0 byte
+	// struct timespec64 ts;
+	bool open_indent, close_indent;
+	unsigned long uptime_nsec;
+	// bool sync;
+  va_start(args, msg);
+
+	// return;
+
+	// if (1) {
+	// 	vprintk(msg, args);
+	// 	return;
+	// }
+
+	mutex_lock(&dbb_lock);
+
+	uptime_nsec = local_clock();
+	written = snprintf(&dbb.buf[dbb.len], DEBUG_BUF_SIZE-dbb.len, "[%2lu.%06lu] ", uptime_nsec / 1000000000, (uptime_nsec % 1000000000) / 1000);
+	dbb.len += written;
+
+  open_indent = len > 0 && msg[len-1] == '{';
+	close_indent = len > 0 && msg[0] == '}';
+
+	if (close_indent) {
+		dbb.indent -= INDENT_LEVEL;
+	}
+
+	// First print indent (spaces)
+	if (dbb.indent > 0) {
+		for (i = 0; i < dbb.indent && dbb.len < DEBUG_BUF_SIZE; i++) {
+			dbb.buf[dbb.len] = ' ';
+			dbb.len++;
+		}
+	}
+
+	// Check whether we can safely strcpy, including \n + \0 byte
+	written = vsnprintf(&dbb.buf[dbb.len], DEBUG_BUF_SIZE-dbb.len, msg, args);
+	dbb.len += written;
+
+	// Add a trailing '\n'
+	if (dbb.len < DEBUG_BUF_SIZE) {
+		dbb.buf[dbb.len] = '\n';
+		dbb.len++;
+	}
+	if (dbb.len < DEBUG_BUF_SIZE) {
+		dbb.buf[dbb.len] = 0;
+	}
+
+	dbb.buf[DEBUG_BUF_SIZE-1] = 0;
+
+	if (open_indent) {
+		dbb.indent += INDENT_LEVEL;
+	}
+
+	len = dbb.len;
+	mutex_unlock(&dbb_lock);
+
+	if (len > 1024) printbb_flush();
+}
+
 int console_printk[4] = {
 	CONSOLE_LOGLEVEL_DEFAULT,	/* console_loglevel */
 	MESSAGE_LOGLEVEL_DEFAULT,	/* default_message_loglevel */
@@ -2120,6 +2213,8 @@ int vprintk_store(int facility, int level,
 	 * timestamp with respect to the caller.
 	 */
 	ts_nsec = local_clock();
+
+	printbb_flush();
 
 	if (!printk_enter_irqsave(recursion_ptr, irqflags))
 		return 0;

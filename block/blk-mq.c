@@ -887,6 +887,7 @@ static void blk_mq_rq_timed_out(struct request *req, bool reserved)
 	if (req->q->mq_ops->timeout) {
 		enum blk_eh_timer_return ret;
 
+		printbb("! blk_mq_rq_timed_out");
 		ret = req->q->mq_ops->timeout(req, reserved);
 		if (ret == BLK_EH_DONE)
 			return;
@@ -965,7 +966,9 @@ static void blk_mq_timeout_work(struct work_struct *work)
 	if (!percpu_ref_tryget(&q->q_usage_counter))
 		return;
 
+	printbb("blk_mq_timeout_work > blk_mq_queue_tag_busy_iter {");
 	blk_mq_queue_tag_busy_iter(q, blk_mq_check_expired, &next);
+	printbb("} // blk_mq_timeout_work > blk_mq_queue_tag_busy_iter");
 
 	if (next != 0) {
 		mod_timer(&q->timeout, next);
@@ -1365,7 +1368,10 @@ bool blk_mq_dispatch_rq_list(struct blk_mq_hw_ctx *hctx, struct list_head *list,
 		 */
 		if (nr_budgets)
 			nr_budgets--;
+		// printbb("queue_rq {");
 		ret = q->mq_ops->queue_rq(hctx, &bd);
+		// printbb("} // queue_rq => %d", ret);
+		// printk("blk_mq_dispatch_rq_list: called queue_rq");
 		switch (ret) {
 		case BLK_STS_OK:
 			queued++;
@@ -1386,6 +1392,7 @@ bool blk_mq_dispatch_rq_list(struct blk_mq_hw_ctx *hctx, struct list_head *list,
 			needs_resource = true;
 			break;
 		default:
+			printk("Failed to queue block (ret %d)", ret);
 			errors++;
 			blk_mq_end_request(rq, ret);
 		}
@@ -1987,7 +1994,9 @@ static blk_status_t __blk_mq_issue_directly(struct blk_mq_hw_ctx *hctx,
 	 * Any other error (busy), just add it to our list as we
 	 * previously would have done.
 	 */
+	// printbb("__blk_mq_issue_directly > queue_rq {");
 	ret = q->mq_ops->queue_rq(hctx, &bd);
+	// printbb("} // __blk_mq_issue_directly > queue_rq");
 	switch (ret) {
 	case BLK_STS_OK:
 		blk_mq_update_dispatch_busy(hctx, false);
@@ -3295,7 +3304,7 @@ int blk_mq_init_allocated_queue(struct blk_mq_tag_set *set,
 		goto err_hctxs;
 
 	INIT_WORK(&q->timeout_work, blk_mq_timeout_work);
-	blk_queue_rq_timeout(q, set->timeout ? set->timeout : 30 * HZ);
+	blk_queue_rq_timeout(q, set->timeout ? set->timeout : 5 * HZ);
 
 	q->tag_set = set;
 

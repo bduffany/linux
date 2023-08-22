@@ -17,6 +17,10 @@ extern int oops_in_progress;	/* If set, an oops, panic(), BUG() or die() is in p
 
 #define PRINTK_MAX_SINGLE_HEADER_LEN 2
 
+void printbb_flush(void);
+
+void printbb(const char *msg, ...);
+
 static inline int printk_get_level(const char *buffer)
 {
 	if (buffer[0] == KERN_SOH_ASCII && buffer[1]) {
